@@ -44,6 +44,7 @@ from .file_utils import (
     cached_path,
     hf_bucket_url,
     is_flax_available,
+    is_offline_mode,
     is_remote_url,
     is_tf_available,
     is_tokenizers_available,
@@ -684,7 +685,7 @@ class BatchEncoding(UserDict):
         # (mfuntowicz: This code is unreachable)
         # else:
         #     raise ImportError(
-        #         "Unable to convert output to tensors format {}".format(tensor_type)
+        #         f"Unable to convert output to tensors format {tensor_type}"
         #     )
 
         # Do the tensor conversion in batch
@@ -726,8 +727,7 @@ class BatchEncoding(UserDict):
             device (:obj:`str` or :obj:`torch.device`): The device to put the tensors on.
 
         Returns:
-            :class:`~transformers.BatchEncoding`: The same instance of :class:`~transformers.BatchEncoding` after
-            modification.
+            :class:`~transformers.BatchEncoding`: The same instance after modification.
         """
 
         # This check catches things like APEX blindly calling "to" on all inputs to a module
@@ -805,9 +805,7 @@ class SpecialTokensMixin:
                 elif isinstance(value, (str, AddedToken)):
                     setattr(self, key, value)
                 else:
-                    raise TypeError(
-                        "special token {} has to be either str or AddedToken but got: {}".format(key, type(value))
-                    )
+                    raise TypeError(f"special token {key} has to be either str or AddedToken but got: {type(value)}")
 
     def sanitize_special_tokens(self) -> int:
         """
@@ -872,7 +870,7 @@ class SpecialTokensMixin:
             assert key in self.SPECIAL_TOKENS_ATTRIBUTES, f"Key {key} is not a special token"
 
             if self.verbose:
-                logger.info("Assigning %s to the %s key of the tokenizer", value, key)
+                logger.info(f"Assigning {value} to the {key} key of the tokenizer")
             setattr(self, key, value)
 
             if key == "additional_special_tokens":
@@ -1596,70 +1594,62 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
         use_auth_token = kwargs.pop("use_auth_token", None)
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", None)
+        from_pipeline = kwargs.pop("_from_pipeline", None)
+        from_auto_class = kwargs.pop("_from_auto", False)
 
-        s3_models = list(cls.max_model_input_sizes.keys())
+        user_agent = {"file_type": "tokenizer", "from_auto_class": from_auto_class, "is_fast": "Fast" in cls.__name__}
+        if from_pipeline is not None:
+            user_agent["using_pipeline"] = from_pipeline
+
+        if is_offline_mode() and not local_files_only:
+            logger.info("Offline mode: forcing local_files_only=True")
+            local_files_only = True
+
         pretrained_model_name_or_path = str(pretrained_model_name_or_path)
         vocab_files = {}
         init_configuration = {}
-        if pretrained_model_name_or_path in s3_models:
-            # Get the vocabulary from AWS S3 bucket
-            for file_id, map_list in cls.pretrained_vocab_files_map.items():
-                vocab_files[file_id] = map_list[pretrained_model_name_or_path]
-            if (
-                cls.pretrained_init_configuration
-                and pretrained_model_name_or_path in cls.pretrained_init_configuration
-            ):
-                init_configuration = cls.pretrained_init_configuration[pretrained_model_name_or_path].copy()
-        else:
-            # Get the vocabulary from local files
-            logger.info(
-                "Model name '{}' not found in model shortcut name list ({}). "
-                "Assuming '{}' is a path, a model identifier, or url to a directory containing tokenizer files.".format(
-                    pretrained_model_name_or_path, ", ".join(s3_models), pretrained_model_name_or_path
+
+        if os.path.isfile(pretrained_model_name_or_path) or is_remote_url(pretrained_model_name_or_path):
+            if len(cls.vocab_files_names) > 1:
+                raise ValueError(
+                    f"Calling {cls.__name__}.from_pretrained() with the path to a single file or url is not "
+                    "supported for this tokenizer. Use a model identifier or the path to a directory instead."
                 )
+            warnings.warn(
+                f"Calling {cls.__name__}.from_pretrained() with the path to a single file or url is deprecated and "
+                "won't be possible anymore in v5. Use a model identifier or the path to a directory instead.",
+                FutureWarning,
             )
-
-            if os.path.isfile(pretrained_model_name_or_path) or is_remote_url(pretrained_model_name_or_path):
-                if len(cls.vocab_files_names) > 1:
-                    raise ValueError(
-                        "Calling {}.from_pretrained() with the path to a single file or url is not supported."
-                        "Use a model identifier or the path to a directory instead.".format(cls.__name__)
-                    )
-                logger.warning(
-                    "Calling {}.from_pretrained() with the path to a single file or url is deprecated".format(
-                        cls.__name__
-                    )
-                )
-                file_id = list(cls.vocab_files_names.keys())[0]
-                vocab_files[file_id] = pretrained_model_name_or_path
-            else:
-                # At this point pretrained_model_name_or_path is either a directory or a model identifier name
-                additional_files_names = {
-                    "added_tokens_file": ADDED_TOKENS_FILE,
-                    "special_tokens_map_file": SPECIAL_TOKENS_MAP_FILE,
-                    "tokenizer_config_file": TOKENIZER_CONFIG_FILE,
-                    "tokenizer_file": FULL_TOKENIZER_FILE,
-                }
-                # Look for the tokenizer files
-                for file_id, file_name in {**cls.vocab_files_names, **additional_files_names}.items():
-                    if os.path.isdir(pretrained_model_name_or_path):
-                        if subfolder is not None:
-                            full_file_name = os.path.join(pretrained_model_name_or_path, subfolder, file_name)
-                        else:
-                            full_file_name = os.path.join(pretrained_model_name_or_path, file_name)
-                        if not os.path.exists(full_file_name):
-                            logger.info("Didn't find file {}. We won't load it.".format(full_file_name))
-                            full_file_name = None
+            file_id = list(cls.vocab_files_names.keys())[0]
+            vocab_files[file_id] = pretrained_model_name_or_path
+        else:
+            # At this point pretrained_model_name_or_path is either a directory or a model identifier name
+            additional_files_names = {
+                "added_tokens_file": ADDED_TOKENS_FILE,
+                "special_tokens_map_file": SPECIAL_TOKENS_MAP_FILE,
+                "tokenizer_config_file": TOKENIZER_CONFIG_FILE,
+                "tokenizer_file": FULL_TOKENIZER_FILE,
+            }
+            # Look for the tokenizer files
+            for file_id, file_name in {**cls.vocab_files_names, **additional_files_names}.items():
+                if os.path.isdir(pretrained_model_name_or_path):
+                    if subfolder is not None:
+                        full_file_name = os.path.join(pretrained_model_name_or_path, subfolder, file_name)
                     else:
-                        full_file_name = hf_bucket_url(
-                            pretrained_model_name_or_path,
-                            filename=file_name,
-                            subfolder=subfolder,
-                            revision=revision,
-                            mirror=None,
-                        )
+                        full_file_name = os.path.join(pretrained_model_name_or_path, file_name)
+                    if not os.path.exists(full_file_name):
+                        logger.info(f"Didn't find file {full_file_name}. We won't load it.")
+                        full_file_name = None
+                else:
+                    full_file_name = hf_bucket_url(
+                        pretrained_model_name_or_path,
+                        filename=file_name,
+                        subfolder=subfolder,
+                        revision=revision,
+                        mirror=None,
+                    )
 
-                    vocab_files[file_id] = full_file_name
+                vocab_files[file_id] = full_file_name
 
         # Get files from url, cache, or disk depending on the case
         resolved_vocab_files = {}
@@ -1669,21 +1659,22 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
                 resolved_vocab_files[file_id] = None
             else:
                 try:
-                    try:
-                        resolved_vocab_files[file_id] = cached_path(
-                            file_path,
-                            cache_dir=cache_dir,
-                            force_download=force_download,
-                            proxies=proxies,
-                            resume_download=resume_download,
-                            local_files_only=local_files_only,
-                            use_auth_token=use_auth_token,
-                        )
-                    except FileNotFoundError as error:
-                        if local_files_only:
-                            unresolved_files.append(file_id)
-                        else:
-                            raise error
+                    resolved_vocab_files[file_id] = cached_path(
+                        file_path,
+                        cache_dir=cache_dir,
+                        force_download=force_download,
+                        proxies=proxies,
+                        resume_download=resume_download,
+                        local_files_only=local_files_only,
+                        use_auth_token=use_auth_token,
+                        user_agent=user_agent,
+                    )
+
+                except FileNotFoundError as error:
+                    if local_files_only:
+                        unresolved_files.append(file_id)
+                    else:
+                        raise error
 
                 except requests.exceptions.HTTPError as err:
                     if "404 Client Error" in str(err):
@@ -1711,9 +1702,9 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
                 continue
 
             if file_path == resolved_vocab_files[file_id]:
-                logger.info("loading file {}".format(file_path))
+                logger.info(f"loading file {file_path}")
             else:
-                logger.info("loading file {} from cache at {}".format(file_path, resolved_vocab_files[file_id]))
+                logger.info(f"loading file {file_path} from cache at {resolved_vocab_files[file_id]}")
 
         return cls._from_pretrained(
             resolved_vocab_files, pretrained_model_name_or_path, init_configuration, *init_inputs, **kwargs
@@ -1873,7 +1864,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
             A tuple of :obj:`str`: The files saved.
         """
         if os.path.isfile(save_directory):
-            logger.error("Provided path ({}) should be a directory, not a file".format(save_directory))
+            logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
             return
         os.makedirs(save_directory, exist_ok=True)
 
@@ -1939,7 +1930,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
         """
         if not legacy_format:
             raise ValueError(
-                "Only fast tokenizers (instances of PretrainedTokenizerFast) can be saved in non legacy format."
+                "Only fast tokenizers (instances of PreTrainedTokenizerFast) can be saved in non legacy format."
             )
 
         save_directory = str(save_directory)
@@ -3144,8 +3135,8 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
             if not self.deprecation_warnings.get("sequence-length-is-longer-than-the-specified-maximum", False):
                 logger.warning(
                     "Token indices sequence length is longer than the specified maximum sequence length "
-                    "for this model ({} > {}). Running this sequence through the model will result in "
-                    "indexing errors".format(len(ids), self.model_max_length)
+                    f"for this model ({len(ids)} > {self.model_max_length}). Running this sequence through the model "
+                    "will result in indexing errors"
                 )
             self.deprecation_warnings["sequence-length-is-longer-than-the-specified-maximum"] = True
 

@@ -48,13 +48,6 @@ PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
     "camembert-base": 512,
 }
 
-SHARED_MODEL_IDENTIFIERS = [
-    # Load with
-    # `tokenizer = AutoTokenizer.from_pretrained("username/pretrained_model")`
-    "Musixmatch/umberto-commoncrawl-cased-v1",
-    "Musixmatch/umberto-wikipedia-uncased-v1",
-]
-
 SPIECE_UNDERLINE = "▁"
 
 
@@ -224,7 +217,7 @@ class CamembertTokenizerFast(PreTrainedTokenizerFast):
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
         if not os.path.isdir(save_directory):
-            logger.error("Vocabulary path ({}) should be a directory".format(save_directory))
+            logger.error(f"Vocabulary path ({save_directory}) should be a directory")
             return
         out_vocab_file = os.path.join(
             save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
